@@ -1,0 +1,21 @@
+# api + query
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+python-multipart==0.0.*
+pydantic>=2.7
+python-dotenv==1.0.*
+
+langgraph>=0.2,<0.3
+langchain-core>=0.3,<0.4
+langchain-aws>=0.2,<0.3
+langchain-text-splitters>=0.3,<0.4
+
+boto3>=1.34
+opensearch-py==2.6.*
+
+# parsing
+pypdf==4.*
+python-docx==1.1.*
+
+# reranker (pulls torch, big - see docs/challenges for the lambda size issue)
+sentence-transformers==3.*

@@ -1,0 +1,5 @@
+{
+  "alice": {"name": "Alice Hughes", "groups": ["all-staff", "platform-eng"]},
+  "bob": {"name": "Bob Patel", "groups": ["all-staff"]},
+  "carol": {"name": "Carol Evans", "groups": ["all-staff", "people-team"]}
+}

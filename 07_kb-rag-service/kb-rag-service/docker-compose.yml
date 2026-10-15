@@ -1,0 +1,21 @@
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.15.0
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - os-data:/usr/share/opensearch/data
+
+  localstack:
+    image: localstack/localstack:3
+    environment:
+      - SERVICES=s3,sqs,dynamodb
+    ports:
+      - "4566:4566"
+
+volumes:
+  os-data:

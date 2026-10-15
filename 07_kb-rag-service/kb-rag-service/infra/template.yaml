@@ -1,0 +1,172 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: kb-rag-service ingestion (S3 -> SQS -> Lambda -> OpenSearch)
+
+# The OpenSearch domain and the API (ECS service) are owned by the platform
+# stack, we just take the endpoint in as a parameter.
+
+Parameters:
+  Env:
+    Type: String
+    AllowedValues: [dev, test, live]
+  OpenSearchHost:
+    Type: String
+    Description: domain endpoint without https://
+  OpenSearchDomainArn:
+    Type: String
+
+Resources:
+  DocsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: IngestQueuePolicy
+    Properties:
+      BucketName: !Sub kb-rag-docs-${Env}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt IngestQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+
+  IngestDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub kb-rag-ingest-dlq-${Env}
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  IngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub kb-rag-ingest-${Env}
+      # must be >= 6x the lambda timeout, otherwise messages come back
+      # while the first attempt is still running (we hit this, see docs)
+      VisibilityTimeout: 5400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestDLQ.Arn
+        maxReceiveCount: 3
+
+  IngestQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref IngestQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: s3.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt IngestQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub arn:aws:s3:::kb-rag-docs-${Env}
+
+  # one row per uploaded doc, backs GET /documents/{doc_id}
+  DocStatusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub kb-rag-doc-status-${Env}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: doc_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: doc_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # attached to the API's ECS task role by the platform stack
+  ApiAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub kb-rag-api-access-${Env}
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::kb-rag-docs-${Env}/uploads/*
+          - Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+            Resource: !GetAtt DocStatusTable.Arn
+
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub kb-rag-ingest-${Env}
+      Runtime: python3.12
+      Handler: app.ingest.handler.lambda_handler
+      CodeUri: ../build/ingest.zip
+      Timeout: 900
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 5  # bedrock embed throttles above this
+      Environment:
+        Variables:
+          DOCS_BUCKET: !Sub kb-rag-docs-${Env}
+          OPENSEARCH_HOST: !Ref OpenSearchHost
+          OPENSEARCH_PORT: "443"
+          OPENSEARCH_USE_IAM: "true"
+          INDEX_NAME: kb-chunks-v1
+          STATUS_TABLE: !Ref DocStatusTable
+          MAX_RECEIVE_COUNT: "3"  # keep in sync with the redrive policy above
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Sub kb-rag-docs-${Env}
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+            - Effect: Allow
+              Action: [es:ESHttpGet, es:ESHttpPost, es:ESHttpPut, es:ESHttpHead]
+              Resource: !Sub ${OpenSearchDomainArn}/*
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt DocStatusTable.Arn
+
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub kb-rag-ingest-dlq-not-empty-${Env}
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+  BucketName:
+    Value: !Ref DocsBucket
+  QueueUrl:
+    Value: !Ref IngestQueue
+  StatusTableName:
+    Value: !Ref DocStatusTable
+  ApiAccessPolicyArn:
+    Description: attach to the API task role
+    Value: !Ref ApiAccessPolicy

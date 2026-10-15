@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest==8.*
+deepeval==1.*
+ruff
+moto[s3,sqs,dynamodb]==5.*
+httpx
