@@ -1,0 +1,13 @@
+IT Security Guidelines
+
+Passwords
+Use a password manager. Passwords must be at least 14 characters long. Never reuse your work password on another website. Turn on two-factor authentication for every work account that supports it.
+
+Lost or stolen devices
+If you lose your laptop or phone, report it to the IT Service Desk straight away by calling 0161 555 0100. The service desk is open 24 hours a day. IT will lock and wipe the device remotely. You should also report a stolen device to the police and give the crime reference number to IT.
+
+Phishing emails
+If an email looks suspicious, do not click any links or open attachments. Use the "Report Phishing" button in Outlook. If you already clicked a link, call the IT Service Desk at once and change your password.
+
+Software
+Only install software from the company software centre. If you need something that is not there, raise a request with IT. Approval usually takes 3 working days.

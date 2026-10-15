@@ -1,0 +1,5 @@
+openai>=1.40,<4
+chromadb>=0.5,<2
+pypdf>=4.0,<6
+python-docx>=1.1,<2
+python-dotenv>=1.0,<2
