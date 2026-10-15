@@ -1,0 +1,34 @@
+{
+  "name": "streambox-agent-behaviour",
+  "description": "Checks agent decisions: which route it takes and when it should say it does not know.",
+  "examples": [
+    {
+      "inputs": {"question": "hello"},
+      "outputs": {"answer": "Hi! How can I help with StreamBox today?", "expected_route": "direct", "expected_refusal": false, "must_include": []}
+    },
+    {
+      "inputs": {"question": "thanks!"},
+      "outputs": {"answer": "You're welcome!", "expected_route": "direct", "expected_refusal": false, "must_include": []}
+    },
+    {
+      "inputs": {"question": "How much is the Basic plan?"},
+      "outputs": {"answer": "Basic costs £5.99 per month.", "expected_route": "retrieve", "expected_refusal": false, "must_include": ["5.99"]}
+    },
+    {
+      "inputs": {"question": "Can I download shows on the Basic plan?"},
+      "outputs": {"answer": "No. Downloads are only on the Standard and Premium plans.", "expected_route": "retrieve", "expected_refusal": false, "must_include": ["Standard"]}
+    },
+    {
+      "inputs": {"question": "My reset link expired, what should I do?"},
+      "outputs": {"answer": "Ask for a new reset link.", "expected_route": "retrieve", "expected_refusal": false, "must_include": ["new"]}
+    },
+    {
+      "inputs": {"question": "What is the capital of France?"},
+      "outputs": {"answer": "I don't know based on the help documents.", "expected_route": "retrieve", "expected_refusal": true, "must_include": []}
+    },
+    {
+      "inputs": {"question": "Does StreamBox have a free trial?"},
+      "outputs": {"answer": "I don't know based on the help documents.", "expected_route": "retrieve", "expected_refusal": true, "must_include": []}
+    }
+  ]
+}

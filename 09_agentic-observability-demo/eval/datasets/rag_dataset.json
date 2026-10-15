@@ -1,0 +1,38 @@
+{
+  "name": "streambox-rag-qa",
+  "description": "Questions that must be answered from the StreamBox help documents.",
+  "examples": [
+    {
+      "inputs": {"question": "How many days do I have to ask for a refund?"},
+      "outputs": {"answer": "You can ask for a refund within 14 days of your first payment.", "must_include": ["14 days | 14-day | fourteen days"], "expected_source": "refund-policy"}
+    },
+    {
+      "inputs": {"question": "How long does a refund take to reach my bank?"},
+      "outputs": {"answer": "The money goes back to your original payment method within 5 to 7 working days.", "must_include": ["5 | five", "7 | seven"], "expected_source": "refund-policy"}
+    },
+    {
+      "inputs": {"question": "Can I get a refund on a gift card?"},
+      "outputs": {"answer": "No. Gift cards cannot be refunded.", "must_include": ["cannot | can't | not | no"], "expected_source": "refund-policy"}
+    },
+    {
+      "inputs": {"question": "How much does the Premium plan cost?"},
+      "outputs": {"answer": "Premium costs £14.99 per month.", "must_include": ["14.99"], "expected_source": "subscription-plans"}
+    },
+    {
+      "inputs": {"question": "How many screens can I watch on with the Standard plan?"},
+      "outputs": {"answer": "Standard lets you watch on two screens at a time.", "must_include": ["two | 2"], "expected_source": "subscription-plans"}
+    },
+    {
+      "inputs": {"question": "How long is the password reset link valid?"},
+      "outputs": {"answer": "The reset link expires after 30 minutes.", "must_include": ["30 minutes | 30 mins | thirty minutes"], "expected_source": "password-reset"}
+    },
+    {
+      "inputs": {"question": "How many devices can I sign in on with one account?"},
+      "outputs": {"answer": "You can sign in on up to 6 devices on one account.", "must_include": ["6 | six"], "expected_source": "supported-devices"}
+    },
+    {
+      "inputs": {"question": "How long do downloads stay on my device?"},
+      "outputs": {"answer": "Downloaded episodes stay on your device for 30 days.", "must_include": ["30 days | thirty days"], "expected_source": "downloads"}
+    }
+  ]
+}
