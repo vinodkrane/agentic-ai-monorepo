@@ -5,31 +5,8 @@
 Two separate paths that only share the OpenSearch index and the embedding model.
 Ingest also writes a status row per document to DynamoDB so clients can poll it.
 
-```
-INGEST (async)
+<img width="1380" height="856" alt="image" src="https://github.com/user-attachments/assets/ddc64e65-487a-4943-a50d-f137e7851ad6" />
 
-  client ──POST /documents──> API ──1. create row (queued)──> DynamoDB doc status
-         <── 202 {doc_id} ──   │                                  ^       ^
-                               │ 2. put_object                    │       │ GET /documents/{doc_id}
-                               v                                  │       │ (API reads it)
-                     S3  uploads/<doc_id>/<file>                  │
-                               │ ObjectCreated                    │ processing / completed /
-                               v                                  │ failed / skipped / replaced
-                     SQS ingest queue ──(3 fails)──> DLQ ──> alarm│
-                               │ long poll                        │
-                               v                                  │
-              EC2 ingest workers (ASG, 1-5, scales on queue depth)┘
-               parse -> chunk -> embed (Titan v2) -> bulk index
-                               │
-                               v
-                     OpenSearch  kb-chunks-v1
-                               ^
-QUERY (sync)                   │ bm25 + knn (both filtered by group)
-                               │
-  client ──POST /query──> API ─┴─> LangGraph agent
-                      check_input -> retrieve -> fuse + acl -> rerank
-                      -> generate (Claude on Bedrock, streamed) -> check_output
-```
 
 ## Components
 
