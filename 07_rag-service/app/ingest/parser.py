@@ -31,7 +31,7 @@ def _parse_pdf(data):
     pages = []
     for i, page in enumerate(reader.pages, start=1):
         pages.append((i, page.extract_text() or ""))
-    # scanned pdfs come back empty here. we don't OCR yet, the handler
+    # scanned pdfs come back empty here. we don't OCR yet, the worker
     # logs it so we can see how often it happens (see docs/challenges...)
     return pages
 

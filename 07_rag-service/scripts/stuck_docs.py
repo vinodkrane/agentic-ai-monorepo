@@ -1,4 +1,4 @@
-"""List docs stuck in "processing" (lambda died mid run, timed out etc.)
+"""List docs stuck in "processing" (worker killed mid run, instance terminated etc.)
 
     python -m scripts.stuck_docs            # default STUCK_AFTER_MINUTES
     python -m scripts.stuck_docs --minutes 5

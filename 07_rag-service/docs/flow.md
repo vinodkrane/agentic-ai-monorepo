@@ -10,15 +10,19 @@
    - if `replaces` is set, that doc exists and the uploader can see it -> else 404
 3. API generates `doc_id` (uuid4 hex) and writes the status row to DynamoDB with
    status `queued`. This happens **before** the S3 put so the row is always there
-   when the lambda looks for it.
+   when a worker looks for it.
 4. API writes the file to `s3://kb-rag-docs-<env>/uploads/<doc_id>/<filename>` with
    metadata `doc-id`, `groups`, `original-name`, `replaces`. If the put fails the
    row is marked `failed` and the client gets a 500.
 5. API returns `202 {"doc_id": "...", "status": "queued"}`. The user doesn't wait for indexing.
 6. S3 sends an `ObjectCreated` event to the ingest SQS queue (prefix filter `uploads/`).
-7. Lambda gets a batch of up to 5 messages. `events.py` unpacks them (skips the S3
-   test event, url-decodes keys, reads `ApproximateReceiveCount`).
-8. For each object, `handler.process`:
+7. An ingest worker (`app/ingest/worker.py`, one container per EC2 instance) is
+   long polling the queue and receives **one** message, asking for
+   `ApproximateReceiveCount`. The message is now invisible to other workers for 300s.
+8. The worker starts a heartbeat thread that pushes the visibility timeout out by
+   another 300s every 60s, so a big doc is never handed to a second worker.
+9. `events.py` unpacks the S3 event from the message body (skips the S3 test
+   event, url-decodes the key). For the object, `worker.process_object`:
    - gets the object, reads `doc-id` from metadata. No doc-id -> log and drop
      (something wrote to the bucket without going through the API).
    - `status.start_processing` -> `processing`. If the doc is already
@@ -27,13 +31,31 @@
    - parse -> chunk -> embed -> delete any partial chunks for this doc_id -> bulk index
    - `status.mark_completed(chunk_count)`
    - if `replaces` was set: delete the old doc's chunks, mark the old row `replaced`
-9. Errors:
-   - no groups, unsupported type, no text -> `skipped`, message deleted, no retry
-   - anything else -> message returned in `batchItemFailures` and retried. Status
-     stays `processing`. On the 3rd attempt it's marked `failed` with the error,
-     then SQS moves the message to the DLQ.
+10. Heartbeat stops. Then:
+    - success or `skipped` (no groups, unsupported type, no text) -> worker deletes the message
+    - any other error -> message is **not** deleted. The worker sets its visibility
+      to `RETRY_DELAY_SECONDS * attempt` (60s, 120s) so it comes back after a short
+      backoff. Status stays `processing`. On the 3rd attempt the doc is marked
+      `failed` with the error, and SQS moves the message to the DLQ.
+11. The worker goes back to polling.
 
-Typical time from upload to `completed` is under a minute for a normal sized doc.
+If the worker or instance dies at any point in 9, nothing is deleted, the heartbeat
+stops, and the message is visible again within 300s for another worker. The retry
+deletes any partial chunks first, so the end result is the same.
+
+On SIGTERM (deploy, scale-in, `docker stop`) the worker finishes the message it
+is on and exits. It doesn't take a new one.
+
+Typical time from upload to `completed` is under a minute for a normal sized doc,
+plus up to 20s for the long poll if the worker was idle, plus ~2 min if the ASG
+has to add an instance during a burst.
+
+### Worker scaling
+
+```
+visible messages > 10 for 2 min       -> +1 instance (+2 if > 60)    max 5
+visible + in flight == 0 for 15 min   -> -1 instance                  min 1
+```
 
 ### Status check
 

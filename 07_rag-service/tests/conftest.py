@@ -23,6 +23,10 @@ def aws(monkeypatch):
             Bucket=config.DOCS_BUCKET,
             CreateBucketConfiguration={"LocationConstraint": config.AWS_REGION},
         )
+        queue_url = boto3.client("sqs", region_name=config.AWS_REGION).create_queue(
+            QueueName="kb-rag-ingest-test")["QueueUrl"]
+        monkeypatch.setattr(config, "INGEST_QUEUE_URL", queue_url)
+
         boto3.client("dynamodb", region_name=config.AWS_REGION).create_table(
             TableName=config.STATUS_TABLE,
             AttributeDefinitions=[{"AttributeName": "doc_id", "AttributeType": "S"}],

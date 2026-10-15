@@ -4,7 +4,7 @@ Four layers, from cheap to expensive. Thresholds live in `evals/common.py`.
 
 | Suite | File | Needs | When it runs |
 |---|---|---|---|
-| Unit tests | `tests/` | nothing | every PR |
+| Unit tests | `tests/` (incl. ingest worker, status API) | nothing, AWS faked with moto | every PR |
 | Retrieval regression | `evals/test_regression.py` | seeded OpenSearch + Titan | every PR (dev index) |
 | Answer quality | `evals/test_deepeval.py` | + Claude (pipeline and judge) | nightly |
 | Safety | `evals/test_safety.py` | + Claude | nightly |
@@ -12,6 +12,36 @@ Four layers, from cheap to expensive. Thresholds live in `evals/common.py`.
 
 Tests that call the LLM are marked `@pytest.mark.llm`, so `pytest -m "not llm"`
 skips them.
+
+## Eval index
+
+The retrieval and LLM evals run against an index seeded with `scripts/seed_local.sh`
+(the three docs in `data/sample_docs` with fixed groups). Seeding calls the same
+parse / chunk / embed / index code as the ingest worker but writes straight to
+OpenSearch, skipping S3, SQS and the status table. That keeps eval runs
+independent of the worker fleet. If you change chunking or the index mapping,
+re-seed before comparing numbers with an older run.
+
+## Ingest pipeline checks
+
+The worker is covered by unit tests rather than evals (`tests/test_worker.py`,
+`tests/test_status.py`, `tests/test_api.py`), against moto S3/SQS/DynamoDB:
+
+| case | expected |
+|---|---|
+| normal doc | status `completed`, `chunk_count` set, message deleted |
+| no groups / no text / unsupported type | status `skipped`, message deleted, nothing indexed |
+| error on attempts 1-2 | status stays `processing`, message kept for retry |
+| error on attempt 3 | status `failed` with the error, message left for the DLQ |
+| fails once then works | status `completed` |
+| same S3 event delivered twice | indexed once |
+| upload with `replaces` | new doc `completed`, old doc `replaced`, old chunks deleted |
+| object without `doc-id` metadata | dropped, nothing indexed |
+| long running doc | heartbeat keeps extending visibility, stops when done |
+| status endpoint | hidden (404) from users outside the doc's groups |
+
+What these don't cover: real Bedrock throttling, OpenSearch errors, scaling.
+Those are watched in dev with the DLQ and queue-age alarms.
 
 ## Golden set
 

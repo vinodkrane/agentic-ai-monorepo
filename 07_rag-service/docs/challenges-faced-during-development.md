@@ -3,10 +3,10 @@
 Notes on things that cost us time, roughly in the order we hit them. Kept here
 so the next person doesn't repeat them.
 
-## 1. S3 test event broke the lambda on day one
+## 1. S3 test event broke ingest on day one
 
 When the bucket notification is first set up, S3 sends a `s3:TestEvent` message
-with no `Records`. The handler assumed there would always be records, threw
+with no `Records`. The ingest code assumed there would always be records, threw
 a KeyError, and the message kept retrying until it hit the DLQ. The DLQ alarm
 went off before a single real document was uploaded.
 
@@ -16,12 +16,16 @@ Fix: `events.py` skips the test event explicitly. There's a unit test for it.
 
 Large PDFs took a few minutes to embed. The queue visibility timeout was still
 the default 30 seconds, so the message became visible again while the first
-lambda was still running, and a second lambda picked it up. We got duplicate
+worker was still on it, and a second worker picked it up. We got duplicate
 chunks in the index.
 
-Fix: visibility timeout set to 6x the lambda timeout (AWS recommendation).
-Also made ingestion idempotent: chunk ids are `<doc_id>-<index>` and we delete
-by `doc_id` before indexing, so running the same file twice gives the same result.
+Fix, two parts:
+- The worker runs a heartbeat thread that extends the message's visibility by
+  300s every 60s while it's working (`keep_invisible` in `worker.py`). Picking
+  one huge fixed timeout instead would mean a crashed worker's message sits
+  invisible for ages before anyone retries it.
+- Ingestion is idempotent: chunk ids are `<doc_id>-<index>` and we delete by
+  `doc_id` before indexing, so processing the same file twice gives the same result.
 
 ## 3. Stale chunks after re-upload
 
@@ -77,19 +81,24 @@ Page numbers, "Confidential" footers and headers became their own chunks and
 matched everything with a high BM25 score for short queries. We drop chunks
 under 30 characters.
 
-## 10. Reranker on Lambda
+## 10. Reranker blew up the image size
 
-We first tried running the query path on Lambda too. The cross encoder pulls in
-torch, which put the package over the 250MB limit, and cold starts were several
-seconds while the model loaded. Moved the query path to ECS where the model is
-baked into the image and loaded once per worker. The ingest lambda doesn't need
-torch so it stays small (`requirements-lambda.txt`).
+The cross encoder pulls in torch. With the default CUDA wheel the API image was
+over 4GB and took ages to pull on deploy, and the first request after start was
+slow while the model downloaded. Fixes: install the CPU-only torch wheel, bake
+the model into the API image at build time, and load it once per uvicorn worker.
+
+The ingest worker doesn't rerank, so it has its own `Dockerfile.worker` and
+`requirements-worker.txt` without torch. Worker image is ~250MB, which matters
+because every new instance pulls it when the ASG scales out.
 
 ## 11. Bedrock throttling during bulk ingest
 
-Uploading a folder of ~200 docs at once spun up lots of lambdas and Titan started
-returning ThrottlingException. Reserved concurrency of 5 on the ingest lambda
-fixed it. The queue just drains slower, which is fine for an async path.
+Uploading a folder of ~200 docs at once scaled the worker fleet out and Titan
+started returning ThrottlingException. Each worker handles one message at a
+time, so the number of concurrent embedders is the number of instances. Capping
+the ASG at `MaxWorkers=5` fixed it. The queue just drains slower, which is fine
+for an async path.
 
 ## 12. deepeval defaults to OpenAI
 
@@ -129,7 +138,7 @@ up as a DLQ alarm that the uploader never saw.
 Added a DynamoDB status table and `GET /documents/{doc_id}`. Upload returns the
 doc_id. Things we got wrong on the way:
 
-- **Status row written after the S3 put.** The lambda sometimes got the event
+- **Status row written after the S3 put.** A worker sometimes got the event
   before the row existed, the conditional update failed and the doc looked
   `queued` forever while actually being indexed. Row now goes in first.
 - **Marking `failed` on the first error.** Bedrock throttles are usually gone by
@@ -142,12 +151,45 @@ doc_id. Things we got wrong on the way:
   with the doc_id. Now only the uploader and members of the doc's groups get it,
   everyone else gets 404.
 
-## 17. Lambda vs EC2 workers for ingest
+## 17. Moving ingest from Lambda to EC2 workers
 
-We seriously considered replacing the lambda with an EC2 worker fleet polling
-SQS. For the docs we have (text PDFs, docx, markdown) Lambda finishes well
-inside its limits, and with workers we'd have to build autoscaling on queue
-depth, graceful shutdown, visibility timeout extension and patching ourselves.
-Decided to stay on Lambda and move to ECS Fargate workers (not raw EC2) if we
-add OCR or heavy parsing. The status table means that switch won't change the
-API at all. Details in architecture.md.
+Ingest started as a Lambda triggered by SQS. Two things pushed us off it: a few
+very large PDFs (300+ pages) got close to the 15 minute limit, and OCR /
+layout-aware parsing is coming, which needs heavier libraries and more time per
+doc. We moved to a small EC2 Auto Scaling group running the worker in Docker.
+
+Lambda had been doing a lot for us quietly. Things we had to add ourselves:
+
+- deleting the message after success (forgot this in the first version - every
+  doc was processed again after the visibility timeout. the conditional status
+  update caught it and dropped the duplicate, which is how we noticed)
+- visibility heartbeat for long docs (see 2)
+- SIGTERM handling so deploys don't cut a doc off half way
+- scaling on queue depth (see 18)
+- getting container logs into CloudWatch (docker `awslogs` driver, one stream
+  per instance id)
+
+The worker code itself stayed small because the per-object logic
+(`process_object`) didn't change, only what calls it.
+
+## 18. Scale-in killed workers mid document
+
+First scale-in alarm was "visible messages == 0 for 15 min". Visible doesn't
+include messages that are being worked on, so during a quiet spell with one big
+doc in progress the ASG terminated an instance, sometimes the busy one. The doc
+was retried by another worker so nothing was lost, but it took twice as long
+and showed up as `attempts: 2` for no real reason.
+
+Fix: the scale-in alarm uses metric math, `visible + in flight == 0`. We still
+don't have a termination lifecycle hook, the in-flight check made it rare enough.
+
+## 19. Retries stampeding after a Bedrock blip
+
+When Bedrock had a few minutes of errors, every failed message came back at
+exactly the same time after the 300s visibility timeout, hit Bedrock together
+and failed again. Some docs burned through all 3 attempts in 10 minutes and
+ended up `failed` in the DLQ for a problem that had already gone away.
+
+Fix: on error the worker sets the message visibility to
+`RETRY_DELAY_SECONDS * attempt` (60s, 120s) so retries spread out. Redriving the
+DLQ cleared the ones that had already failed.

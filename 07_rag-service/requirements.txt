@@ -17,5 +17,5 @@ opensearch-py==2.6.*
 pypdf==4.*
 python-docx==1.1.*
 
-# reranker (pulls torch, big - see docs/challenges for the lambda size issue)
+# reranker (pulls torch, big - API only, the ingest worker uses requirements-worker.txt)
 sentence-transformers==3.*

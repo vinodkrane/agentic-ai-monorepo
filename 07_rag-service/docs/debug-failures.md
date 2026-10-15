@@ -1,7 +1,8 @@
 # Debugging failures
 
 Symptom first, then where to look. All logs go to CloudWatch:
-`/aws/lambda/kb-rag-ingest-<env>` for ingest, the ECS service log group for the API.
+`/kb-rag/ingest-worker-<env>` for ingest (one log stream per EC2 instance id),
+the ECS service log group for the API.
 
 ## Ingest
 
@@ -15,7 +16,7 @@ aws dynamodb get-item --table-name kb-rag-doc-status-dev --key '{"doc_id": {"S":
 
 | status | look at |
 |---|---|
-| `queued` for more than a couple of minutes | the lambda isn't getting the event. see "Stuck in queued" |
+| `queued` for more than a couple of minutes | no worker has picked it up. see "Stuck in queued" |
 | `processing` for more than 20 min | see "Stuck in processing" |
 | `failed` | `error` has the exception. see "Messages in the DLQ" |
 | `skipped` | `error` says why. not a bug, usually a scanned pdf or an unsupported file |
@@ -23,33 +24,70 @@ aws dynamodb get-item --table-name kb-rag-doc-status-dev --key '{"doc_id": {"S":
 
 `attempts` on the row is the SQS receive count of the last try.
 
+Search all worker logs for a doc:
+
+```bash
+aws logs filter-log-events --log-group-name /kb-rag/ingest-worker-dev \
+  --filter-pattern '"<doc_id>"' --query 'events[].message' --output text
+```
+
 ### Stuck in queued
 
 1. Check the object exists: `aws s3 ls s3://kb-rag-docs-dev/uploads/<doc_id>/`.
    Not there -> the S3 put failed after the row was written. The row should be
    `failed`, if it isn't the API died between the two calls. Ask the user to re-upload.
-2. Check the queue has messages / the lambda is being invoked (CloudWatch
-   `Invocations` metric). Nothing -> the S3 notification isn't firing, check the
-   prefix filter is `uploads/` and the queue policy allows the bucket.
-3. Lambda throttled -> reserved concurrency is 5, a big batch upload just takes
-   a while. Check `ApproximateNumberOfMessagesVisible` is going down.
+2. Check the message reached the queue (`ApproximateNumberOfMessagesVisible` on
+   `kb-rag-ingest-<env>`). Queue empty and nothing in flight -> the S3
+   notification isn't firing, check the prefix filter is `uploads/` and the queue
+   policy allows the bucket.
+3. Messages are piling up -> workers aren't consuming. Check the fleet:
+   ```bash
+   aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names kb-rag-ingest-worker-dev \
+     --query 'AutoScalingGroups[0].Instances[].[InstanceId,LifecycleState,HealthStatus]'
+   ```
+   - no instances in service -> check ASG activity history (launch failures, subnet
+     out of IPs, AMI parameter)
+   - instances running but nothing in the log group -> the container never
+     started. Connect with SSM and look:
+     ```bash
+     aws ssm start-session --target <instance-id>
+     sudo docker ps -a
+     sudo docker logs ingest-worker --tail 100
+     sudo cat /var/log/cloud-init-output.log   # user data errors, ECR login / pull failures
+     ```
+     Usual causes: ECR pull denied (instance role / image tag doesn't exist),
+     `INGEST_QUEUE_URL is not set`, no route to SQS (NAT / VPC endpoint missing).
+4. Fleet is at max (5) and the queue is still deep -> just a big batch, it'll
+   drain. Check `ApproximateNumberOfMessagesVisible` is going down. Don't raise
+   `MaxWorkers` without checking Bedrock quotas first.
+
+The `kb-rag-ingest-queue-stale-<env>` alarm fires when the oldest message is
+over 30 minutes old, which usually means step 3.
 
 ### Stuck in processing
 
-The lambda was killed (timeout, out of memory) after `start_processing` and
-before it could write the result. SQS will redeliver after the visibility
-timeout, so first wait for that (90 min with our settings). If it's still
-stuck:
+A worker took the message and then died or was terminated (scale-in, deploy,
+OOM, instance failure) before it could write the result. The heartbeat stops
+when the worker dies, so SQS makes the message visible again within 300s and
+another worker retries it. So first wait 5 minutes and check `attempts` went up.
+
+If it's still stuck:
 
 ```bash
 python -m scripts.stuck_docs                 # list
 python -m scripts.stuck_docs --mark-failed   # give the uploader a real status
 ```
 
-Search the lambda logs for the doc_id. `Task timed out` or `Runtime exited`
-with memory errors -> the doc is too big for the lambda. Short term: bump
-memory. If this keeps happening, it's the signal to move ingest to ECS workers
-(see architecture.md).
+Search the worker logs for the doc_id. Things to look for:
+- log stops mid-doc with no error -> container was killed. `docker inspect
+  ingest-worker` on the instance shows `OOMKilled: true` for out of memory. Very
+  large docs on t3.medium can do this, bump `InstanceType`.
+- `visibility heartbeat failed` warnings -> the worker couldn't extend the
+  message, so another worker may have started on the same doc. Check the role
+  has `sqs:ChangeMessageVisibility`. The second run is safe (delete-before-index),
+  it just wastes time.
+- a doc that legitimately takes more than 20 min shows here too. It isn't stuck,
+  the status row only updates at the start and end.
 
 ### Status `completed` but questions don't find it
 
@@ -69,15 +107,15 @@ aws sqs receive-message --queue-url <dlq-url> --max-number-of-messages 5
 ```
 
 The doc's status row will be `failed` with the error. Get the key from the
-message body (it has the doc_id in it), then search lambda logs for the doc_id.
+message body (it has the doc_id in it), then search the worker logs for the doc_id.
 Usual causes:
 
 | error | cause | fix |
 |---|---|---|
-| ThrottlingException | Bedrock limit | wait, then redrive. lower reserved concurrency if it keeps happening |
-| AuthorizationException (403) from OpenSearch | lambda role missing es:ESHttp* or domain access policy | fix IAM / domain policy |
+| ThrottlingException | Bedrock limit | wait, then redrive. lower `MaxWorkers` if it keeps happening |
+| AuthorizationException (403) from OpenSearch | worker role missing es:ESHttp* or domain access policy doesn't include the worker role | fix IAM / domain policy |
 | `indexing failed` + mapper_parsing_exception | embedding dimension doesn't match the index | EMBED_DIM / model mismatch, see architecture.md about new index versions |
-| Task timed out after 900s | very large doc | split the doc, or bump timeout and visibility timeout together |
+| ConnectTimeout to OpenSearch | worker SG not allowed by the domain SG | add the worker SG to the domain SG ingress on 443 |
 | PdfReadError | corrupt or encrypted PDF | ask the owner for an unlocked copy |
 
 After fixing, redrive from the DLQ in the console (SQS -> DLQ -> Start DLQ redrive).
@@ -97,11 +135,18 @@ curl -s -XPOST "localhost:9200/kb-chunks-v1/_delete_by_query" -H 'content-type: 
   -d '{"query": {"term": {"doc_id": "<old doc_id>"}}}'
 ```
 
-### Status update errors in lambda logs
+### Status update errors in worker logs
 
-`AccessDeniedException` on `UpdateItem` -> lambda role is missing the DynamoDB
+`AccessDeniedException` on `UpdateItem` -> worker role is missing the DynamoDB
 statement, or `STATUS_TABLE` points at the wrong env's table. The doc will
 retry and land in the DLQ, fix the role then redrive.
+
+### Deploy rolled out but workers still run the old code
+
+The ASG only replaces instances when the launch template version changes, which
+happens when `WorkerImage` changes. Re-pushing the same tag does nothing. Always
+deploy with a new tag (`make push-worker` tags with the git sha). Check which
+image an instance is running with `sudo docker inspect ingest-worker --format '{{.Config.Image}}'`.
 
 ## Query
 

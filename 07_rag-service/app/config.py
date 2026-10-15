@@ -16,8 +16,15 @@ DOCS_BUCKET = _get("DOCS_BUCKET", "kb-rag-docs-dev")
 INGEST_QUEUE_URL = _get("INGEST_QUEUE_URL", "")
 # set this when running against localstack, leave empty in AWS
 AWS_ENDPOINT_URL = _get("AWS_ENDPOINT_URL") or None
+# worker / queue settings
 # must match maxReceiveCount on the queue redrive policy (infra/template.yaml)
 MAX_RECEIVE_COUNT = int(_get("MAX_RECEIVE_COUNT", "3"))
+VISIBILITY_TIMEOUT = int(_get("VISIBILITY_TIMEOUT", "300"))
+# extend visibility this often while a doc is being processed, keep it well under VISIBILITY_TIMEOUT
+HEARTBEAT_SECONDS = int(_get("HEARTBEAT_SECONDS", "60"))
+# failed message comes back after RETRY_DELAY_SECONDS * attempt
+RETRY_DELAY_SECONDS = int(_get("RETRY_DELAY_SECONDS", "60"))
+POLL_WAIT_SECONDS = int(_get("POLL_WAIT_SECONDS", "20"))
 
 # DynamoDB table for document ingest status
 STATUS_TABLE = _get("STATUS_TABLE", "kb-rag-doc-status-dev")
@@ -36,7 +43,7 @@ EMBED_DIM = int(_get("EMBED_DIM", "1024"))
 LLM_MODEL_ID = _get("LLM_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
 JUDGE_MODEL_ID = _get("JUDGE_MODEL_ID", LLM_MODEL_ID)
 
-# reranker runs locally (cross encoder), small enough for lambda/ecs
+# reranker runs locally (cross encoder) inside the API container
 RERANK_MODEL = _get("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RERANK_ENABLED = _get("RERANK_ENABLED", "true").lower() == "true"
 

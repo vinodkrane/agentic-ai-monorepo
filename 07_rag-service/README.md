@@ -1,4 +1,4 @@
-# kb-rag-service
+# rag-service
 
 Question answering over internal documents. Staff upload policy docs, runbooks
 etc., and ask questions in plain English. Answers come back with citations and
@@ -6,12 +6,12 @@ only use documents the user is allowed to see.
 
 Built with LangGraph (single agent, fixed graph), OpenSearch hybrid search
 (BM25 + kNN), Bedrock for embeddings and generation, and a cross encoder for
-reranking.
+reranking. Ingestion runs on a small EC2 worker fleet that pulls from SQS.
 
 ```
-upload:  client -> POST /documents -> S3 -> SQS -> ingest lambda -> OpenSearch
-                          |                            |
-                          +---- DynamoDB doc status ---+   <- GET /documents/{doc_id}
+upload:  client -> POST /documents -> S3 -> SQS -> EC2 ingest workers -> OpenSearch
+                          |                              |
+                          +----- DynamoDB doc status ----+   <- GET /documents/{doc_id}
 query:   client -> POST /query -> LangGraph agent -> OpenSearch + Bedrock -> answer
 ```
 
@@ -28,8 +28,8 @@ app/
   users.py            user -> groups lookup (static json for now)
   status.py           doc ingest status in DynamoDB (queued/processing/completed/...)
   ingest/
-    handler.py        lambda entry point
-    events.py         unpacks S3 events from SQS messages
+    worker.py         SQS polling worker, runs on EC2 (and locally with `make worker`)
+    events.py         unpacks S3 events from SQS message bodies
     parser.py         pdf / docx / txt / md -> text
     chunker.py        recursive splitter, adds ACL groups to every chunk
     indexer.py        index mapping, bulk index, delete old chunks
@@ -44,8 +44,10 @@ app/
     prompts.py
 evals/                golden set, regression, deepeval, safety, latency
 tests/                unit tests, AWS faked with moto
-scripts/              local ingest, seeding, CLI, local queue poller, stuck docs
-infra/template.yaml   SAM template for bucket, queue, DLQ, status table, lambda
+scripts/              local ingest, seeding, CLI, stuck docs
+infra/template.yaml   CloudFormation: bucket, queue + DLQ, status table, worker ASG, alarms
+Dockerfile            API image (ECS)
+Dockerfile.worker     ingest worker image (EC2)
 docs/
 ```
 
@@ -73,7 +75,8 @@ python -m scripts.ask alice "how many days of leave can I carry over?"
 python -m scripts.ask bob "how fast do I ack a P1?"   # bob isn't in platform-eng, should get no answer
 ```
 
-Or run the API (and the queue poller in a second terminal if you want uploads to work):
+Or run the API, and the ingest worker in a second terminal if you want uploads to work.
+It's the same worker code that runs on EC2, pointed at localstack.
 
 ```bash
 make api
@@ -112,7 +115,7 @@ Example query response:
 | status | meaning |
 |---|---|
 | `queued` | in S3, waiting on the queue |
-| `processing` | lambda is working on it (or retrying after an error) |
+| `processing` | a worker is on it (or it's waiting to be retried after an error) |
 | `completed` | searchable. `chunk_count` is set |
 | `failed` | gave up after 3 attempts, `error` says why. message is in the DLQ |
 | `skipped` | retrying won't help: unsupported type, no text (scanned PDF), no groups |
@@ -133,26 +136,34 @@ See [docs/evals.md](docs/evals.md) for what each one checks and the thresholds.
 
 ## Deploying
 
-The ingest lambda, bucket, queues and status table are in `infra/template.yaml`:
+### Ingest (bucket, queue, status table, worker fleet)
+
+All in `infra/template.yaml`. The worker runs as a Docker container on each
+instance of an Auto Scaling group that scales on queue depth (1 to 5 instances
+by default). Create the ECR repo `kb-rag-worker` once, then:
 
 ```bash
-make lambda-zip
-sam deploy --template-file infra/template.yaml --stack-name kb-rag-ingest-dev \
-  --parameter-overrides Env=dev OpenSearchHost=<endpoint> OpenSearchDomainArn=<arn> \
-  --capabilities CAPABILITY_IAM
+make push-worker                    # build Dockerfile.worker, push to ECR tagged with the git sha
+
+make deploy-ingest ENV=dev \
+  SUBNETS=subnet-aaa,subnet-bbb SG=sg-123 \
+  OPENSEARCH_HOST=<domain endpoint> OPENSEARCH_ARN=<domain arn>
 ```
+
+Deploying a new image tag creates a new launch template version and the ASG
+replaces instances one at a time. Messages a stopped worker was holding come
+back on the queue and get picked up by another worker.
+
+Subnets need a route to S3, SQS, DynamoDB, Bedrock, ECR and OpenSearch (NAT or
+VPC endpoints). The worker security group only needs outbound 443, and the
+OpenSearch domain must allow it. No SSH, use SSM Session Manager.
+
+### API
 
 The API is built from the `Dockerfile` and deployed to the shared ECS cluster
 through the platform pipeline. It needs the same env vars as `.env.example`
 minus `AWS_ENDPOINT_URL`, with `OPENSEARCH_USE_IAM=true`. Attach the
 `ApiAccessPolicyArn` stack output to the API task role (S3 put + status table).
-
-### Why Lambda and not EC2/ECS workers for ingest
-
-Ingest is parse + Bedrock calls + bulk index, which fits comfortably inside
-Lambda's 15 minutes and needs no torch. If we add OCR, Textract post-processing
-or layout models, move it to ECS Fargate workers polling the same queue. The
-status table and API don't change. See [architecture.md](docs/architecture.md).
 
 ## Docs
 
@@ -170,3 +181,5 @@ status table and API don't change. See [architecture.md](docs/architecture.md).
 - `user_id` is passed in the request. In live it should come from the auth token.
 - No `DELETE /documents/{doc_id}` yet.
 - Toxicity check on the hot path is a word list. Bedrock Guardrails is the likely replacement.
+- No ASG termination lifecycle hook. A worker killed on scale-in loses its
+  current doc, which is retried by another worker (safe, just slower).

@@ -1,0 +1,13 @@
+# Ingest worker image. Runs on the EC2 worker ASG (see infra/template.yaml).
+FROM python:3.12-slim
+
+WORKDIR /srv
+
+COPY requirements-worker.txt .
+RUN pip install --no-cache-dir -r requirements-worker.txt
+
+COPY app ./app
+
+# docker stop sends SIGTERM, the worker finishes the current doc then exits.
+# run with --stop-timeout long enough for a big doc (user data uses 300)
+CMD ["python", "-m", "app.ingest.worker"]

@@ -1,4 +1,4 @@
-# ingestion lambda only needs this subset - keeps the zip under the 250MB limit
+# ingest worker only needs this subset - no torch, keeps the image small
 python-dotenv==1.0.*
 boto3>=1.34
 opensearch-py==2.6.*

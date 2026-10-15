@@ -43,7 +43,7 @@ async def upload_document(
     replaces: str = Form(None),
 ):
     """Upload a doc. Returns a doc_id straight away, indexing happens async:
-    S3 -> SQS -> ingest lambda. Poll GET /documents/{doc_id} for progress.
+    S3 -> SQS -> ingest worker (EC2). Poll GET /documents/{doc_id} for progress.
 
     Pass `replaces=<old doc_id>` to upload a new version of an existing doc.
     The old chunks are removed once the new version is indexed.
@@ -75,7 +75,7 @@ async def upload_document(
     doc_id = uuid.uuid4().hex
     key = f"uploads/{doc_id}/{file.filename}"
 
-    # status row goes in first, the lambda can pick the object up within
+    # status row goes in first, a worker can pick the object up within
     # a second of the put and needs the row to exist
     status.create(doc_id, file.filename, key, group_list, user_id, replaces=replaces)
 

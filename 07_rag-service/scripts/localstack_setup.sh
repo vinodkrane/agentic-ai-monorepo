@@ -16,7 +16,7 @@ DLQ_ARN=$(aws --endpoint-url $ENDPOINT sqs get-queue-attributes --queue-url $DLQ
   --attribute-names QueueArn --query Attributes.QueueArn --output text)
 
 QUEUE_URL=$(aws --endpoint-url $ENDPOINT sqs create-queue --queue-name $QUEUE \
-  --attributes "{\"VisibilityTimeout\":\"60\",\"RedrivePolicy\":\"{\\\"deadLetterTargetArn\\\":\\\"$DLQ_ARN\\\",\\\"maxReceiveCount\\\":\\\"3\\\"}\"}" \
+  --attributes "{\"VisibilityTimeout\":\"300\",\"RedrivePolicy\":\"{\\\"deadLetterTargetArn\\\":\\\"$DLQ_ARN\\\",\\\"maxReceiveCount\\\":\\\"3\\\"}\"}" \
   --query QueueUrl --output text)
 QUEUE_ARN=$(aws --endpoint-url $ENDPOINT sqs get-queue-attributes --queue-url $QUEUE_URL \
   --attribute-names QueueArn --query Attributes.QueueArn --output text)
